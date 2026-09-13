@@ -164,11 +164,38 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     window.copyToClipboard = (text) => {
-        navigator.clipboard.writeText(text).then(() => {
-            showMessage('Copied to clipboard!');
-        }).catch(() => {
-            showMessage('Failed to copy to clipboard.', true);
-        });
+        if (navigator.clipboard && window.isSecureContext) {
+            // Modern Clipboard API
+            navigator.clipboard.writeText(text).then(() => {
+                showMessage('Copied to clipboard!');
+            }).catch(() => {
+                showMessage('Failed to copy to clipboard.', true);
+            });
+        } else {
+            // Legacy Fallback for mobile / in-app browsers
+            try {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                // Prevent scrolling to bottom
+                textArea.style.position = "fixed";
+                textArea.style.left = "-999999px";
+                textArea.style.top = "-999999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                
+                const successful = document.execCommand('copy');
+                document.body.removeChild(textArea);
+                
+                if (successful) {
+                    showMessage('Copied to clipboard!');
+                } else {
+                    showMessage('Failed to copy to clipboard.', true);
+                }
+            } catch (err) {
+                showMessage('Failed to copy to clipboard.', true);
+            }
+        }
     };
 
     window.toggleStatus = (id, currentStatus) => {

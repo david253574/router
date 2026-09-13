@@ -68,6 +68,30 @@ app.use((err, req, res, next) => {
     next();
 });
 
+// Subdomain Alias Detection Middleware
+app.use((req, res, next) => {
+    const baseDomain = process.env.REDIRECT_BASE_DOMAIN;
+    let host = req.hostname;
+    if (!host) return next();
+
+    host = host.toLowerCase();
+    
+    let alias = null;
+    if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase())) {
+        alias = host.slice(0, -('.' + baseDomain).length);
+    } else if (process.env.NODE_ENV !== 'production' && host.endsWith('.localhost')) {
+        alias = host.slice(0, -('.localhost').length);
+    }
+    
+    if (alias && alias !== 'www') {
+        if (req.path === '/') {
+            const { handleRedirect } = require('./routes/redirectHandler');
+            return handleRedirect(alias, res);
+        }
+    }
+    next();
+});
+
 // Stateless cookie session configuration (Vercel compatible)
 app.use(cookieSession({
     name: 'session',

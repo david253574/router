@@ -39,6 +39,14 @@ router.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Config check for UI
+router.get('/config', (req, res) => {
+    res.json({ 
+        baseDomain: process.env.REDIRECT_BASE_DOMAIN || null,
+        isLocal: process.env.NODE_ENV !== 'production'
+    });
+});
+
 // Create a new redirect
 router.post('/redirects', (req, res) => {
     // Only extract expected fields
@@ -75,7 +83,14 @@ router.post('/redirects', (req, res) => {
             return res.status(500).json({ error: 'Database error' });
         }
         
-        const redirectUrl = `${req.protocol}://${req.get('host')}/r/${alias}`;
+        let redirectUrl = `${req.protocol}://${req.get('host')}/r/${alias}`;
+        const baseDomain = process.env.REDIRECT_BASE_DOMAIN;
+        if (baseDomain) {
+            redirectUrl = `${req.protocol}://${alias}.${baseDomain}`;
+        } else if (process.env.NODE_ENV !== 'production' && req.get('host').includes('localhost')) {
+            redirectUrl = `${req.protocol}://${alias}.localhost:${req.get('host').split(':')[1] || 3000}`;
+        }
+
         res.status(201).json({
             success: true,
             redirect: {
@@ -96,11 +111,21 @@ router.get('/redirects', (req, res) => {
         if (err) {
             return res.status(500).json({ error: 'Database error' });
         }
-        const redirects = rows.map(r => ({
-            ...r,
-            active: Boolean(r.active),
-            redirect_url: `${req.protocol}://${req.get('host')}/r/${r.alias}`
-        }));
+        const redirects = rows.map(r => {
+            let redirectUrl = `${req.protocol}://${req.get('host')}/r/${r.alias}`;
+            const baseDomain = process.env.REDIRECT_BASE_DOMAIN;
+            if (baseDomain) {
+                redirectUrl = `${req.protocol}://${r.alias}.${baseDomain}`;
+            } else if (process.env.NODE_ENV !== 'production' && req.get('host').includes('localhost')) {
+                redirectUrl = `${req.protocol}://${r.alias}.localhost:${req.get('host').split(':')[1] || 3000}`;
+            }
+            
+            return {
+                ...r,
+                active: Boolean(r.active),
+                redirect_url: redirectUrl
+            };
+        });
         res.json(redirects);
     });
 });

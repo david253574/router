@@ -31,7 +31,31 @@ document.addEventListener('DOMContentLoaded', () => {
     function showApp() {
         loginSection.style.display = 'none';
         appSection.style.display = 'block';
+        loadConfig();
         loadRedirects();
+    }
+
+    function loadConfig() {
+        fetch('/api/config')
+            .then(res => {
+                if (!res.ok) throw new Error();
+                return res.json();
+            })
+            .then(data => {
+                const banner = document.getElementById('config-banner');
+                if (data.baseDomain) {
+                    banner.className = 'message success';
+                    banner.textContent = `Custom domain is configured: ${data.baseDomain}`;
+                } else if (data.isLocal) {
+                    banner.className = 'message';
+                    banner.textContent = `Local dev mode. Subdomains work at *.localhost`;
+                } else {
+                    banner.className = 'message';
+                    banner.textContent = `Custom domain is NOT configured. Fallback /r/alias URLs will be used.`;
+                }
+                banner.style.display = 'block';
+            })
+            .catch(() => {});
     }
 
     function showMessage(msg, isError = false, el = messageEl) {

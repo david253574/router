@@ -74,7 +74,7 @@ app.use((req, res, next) => {
     let host = req.hostname;
     if (!host) return next();
 
-    host = host.toLowerCase();
+    host = host.toLowerCase().replace(/\.$/, '');
     
     let alias = null;
     if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase())) {

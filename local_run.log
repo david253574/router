@@ -1,0 +1,40 @@
+
+> redirect@1.0.0 start
+> node server.js
+
+◇ injected env (7) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ⌘ enable debugging { debug: true }
+Connected to libSQL/Turso database: libsql://logistics-logistics.aws-us-east-2.turso.io
+Server is running on port 3000
+
+> redirect@1.0.0 start
+> node server.js
+
+◇ injected env (7) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+Connected to libSQL/Turso database: libsql://logistics-logistics.aws-us-east-2.turso.io
+Server is running on port 3000
+
+> redirect@1.0.0 start
+> node server.js
+
+◇ injected env (7) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+Connected to libSQL/Turso database: libsql://logistics-logistics.aws-us-east-2.turso.io
+Server is running on port 3000
+
+> redirect@1.0.0 start
+> node server.js
+
+◇ injected env (7) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+Connected to libSQL/Turso database: libsql://logistics-logistics.aws-us-east-2.turso.io
+Server is running on port 3000
+
+> redirect@1.0.0 start
+> node server.js
+
+◇ injected env (7) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+Connected to libSQL/Turso database: libsql://logistics-logistics.aws-us-east-2.turso.io
+Server is running on port 3000

@@ -1,0 +1,7 @@
+node_modules/
+.env
+database.sqlite
+database.sqlite-*
+.env.local
+.env.production
+.env.development

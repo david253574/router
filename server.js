@@ -105,6 +105,11 @@ app.use(cookieSession({
 // Static files (only /public is served)
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Explicitly serve dashboard for the root domain so Vercel doesn't intercept it with a static index.html
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
 // Authentication Routes
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth', authRoutes);

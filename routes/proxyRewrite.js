@@ -289,13 +289,37 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
     // routing (SNI, HTTP/1.1 Host header).
     forwardHeaders['host'] = parsed.hostname;
 
+    // Origin and Referer Spoofing
+    if (forwardHeaders['origin']) {
+        forwardHeaders['origin'] = parsed.origin;
+    }
+    if (forwardHeaders['referer']) {
+        try {
+            const refUrl = new URL(forwardHeaders['referer']);
+            refUrl.protocol = parsed.protocol;
+            refUrl.host = parsed.host;
+            forwardHeaders['referer'] = refUrl.toString();
+        } catch {
+            forwardHeaders['referer'] = parsed.origin + '/';
+        }
+    }
+
+    // Handle body for non-GET/HEAD/OPTIONS requests that were parsed by express.json
+    let bodyStr = null;
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+        if (req._body && req.body && typeof req.body === 'object') {
+            bodyStr = JSON.stringify(req.body);
+            forwardHeaders['content-length'] = String(Buffer.byteLength(bodyStr));
+        }
+    }
+
     const options = {
         hostname: parsed.hostname,
         port:     parsed.port
                       ? Number(parsed.port)
                       : parsed.protocol === 'https:' ? 443 : 80,
         path:     parsed.pathname + parsed.search,
-        method:   'GET',
+        method:   req.method,
         headers:  forwardHeaders,
         // 10-second wall-clock timeout (Vercel Pro limit is 60 s)
         timeout:  10000,
@@ -355,6 +379,13 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
                 }
                 // If no wildcard domain is resolvable, drop the Set-Cookie header
                 // rather than forward a cookie the browser would reject
+                continue;
+            }
+
+            // CORS Override: rewrite upstream ACA-Origin to match the client's origin
+            if (lkey === 'access-control-allow-origin') {
+                const clientOrigin = req.get('origin') || '*';
+                try { res.set('access-control-allow-origin', clientOrigin); } catch {}
                 continue;
             }
 
@@ -423,7 +454,21 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
         if (!res.headersSent) res.status(502).end();
     });
 
-    proxyReq.end();
+    // Body dispatch
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+        if (bodyStr !== null) {
+            proxyReq.write(bodyStr);
+            proxyReq.end();
+        } else if (req._body) {
+            // Body was consumed by body-parser but wasn't a standard JSON object
+            proxyReq.end();
+        } else {
+            // Stream unparsed body
+            req.pipe(proxyReq);
+        }
+    } else {
+        proxyReq.end();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +519,12 @@ function proxyToDestination(alias, req, res) {
 
             // All checks passed — perform internal rewrite.
             // The browser URL remains on the wildcard subdomain.
-            performProxy(row.destination_url, req, res);
+            let finalTarget = row.destination_url;
+            if (req.url && req.url !== '/') {
+                const base = finalTarget.endsWith('/') ? finalTarget.slice(0, -1) : finalTarget;
+                finalTarget = base + req.url;
+            }
+            performProxy(finalTarget, req, res);
         }
     );
 }

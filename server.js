@@ -86,7 +86,7 @@ app.use((req, res, next) => {
         isWildcard = true;
     }
 
-    if (isWildcard && req.path === '/') {
+    if (isWildcard) {
         // 1. Validate request (use existing redirectLimiter)
         return redirectLimiter(req, res, () => {
             // 2. Run traffic checks — circuit-break before any DB call

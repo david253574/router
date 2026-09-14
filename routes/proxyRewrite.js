@@ -179,7 +179,10 @@ function injectBaseTag(htmlBuffer, destinationUrl) {
     if (injectedPath !== '/') {
         stateScript = `<script>
             if (window.location.pathname + window.location.search !== ${JSON.stringify(injectedPath)}) {
-                window.history.replaceState(null, '', ${JSON.stringify(injectedPath)});
+                // Prepend window.location.origin to force an absolute URL.
+                // Otherwise, the <base> tag would resolve this relative path to the cross-origin 
+                // destination domain, which throws a SecurityError.
+                window.history.replaceState(null, '', window.location.origin + ${JSON.stringify(injectedPath)});
             }
         </script>`;
     }

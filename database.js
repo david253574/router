@@ -89,4 +89,17 @@ db.run(`
     if (err) console.error('Error creating table:', err.message);
 });
 
+// Session-binding table for the wildcard-subdomain one-user-per-link policy
+db.run(`
+    CREATE TABLE IF NOT EXISTS alias_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alias TEXT UNIQUE NOT NULL,
+        session_token TEXT UNIQUE NOT NULL,
+        client_sig TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+`, (err) => {
+    if (err) console.error('Error creating alias_sessions table:', err.message);
+});
+
 module.exports = db;

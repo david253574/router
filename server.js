@@ -9,6 +9,8 @@ const redirectRoutes = require('./routes/redirects');
 const authRoutes = require('./routes/auth');
 const db = require('./database');
 const { checkTraffic } = require('./routes/trafficFilter');
+const { guardSession } = require('./routes/sessionGuard');
+const { proxyToDestination } = require('./routes/proxyRewrite');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -101,13 +103,18 @@ app.use((req, res, next) => {
                 alias = host.slice(0, -('.localhost').length);
             }
 
-            // 4 & 5 & 6 & 7 & 8. Find alias, check active, check expiration, 302 redirect
-            if (alias) {
-                const { handleRedirect } = require('./routes/redirectHandler');
-                return handleRedirect(alias, res);
-            } else {
-                return next();
-            }
+            if (!alias) return next();
+
+            // 4. Session validation — enforce one-user-per-link policy
+            //    guardSession either calls onAllow() or terminates the response.
+            //    proxyToDestination() (and the Turso DB query for destination_url)
+            //    is only reached when the session is authorised.
+            return guardSession(req, res, alias, () => {
+                // 5 & 6 & 7 & 8. Validate alias, check active/expiration,
+                //                 then stream content via internal rewrite —
+                //                 no HTTP redirect is issued; browser URL unchanged.
+                return proxyToDestination(alias, req, res);
+            });
         });
     }
 

@@ -31,7 +31,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Security Headers
-app.use(helmet({
+const helmetMiddleware = helmet({
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
@@ -39,7 +39,30 @@ app.use(helmet({
             styleSrc: ["'self'", "'unsafe-inline'"],
         }
     }
-}));
+});
+
+app.use((req, res, next) => {
+    const baseDomain = process.env.REDIRECT_BASE_DOMAIN;
+    let host = req.hostname;
+    
+    if (host) {
+        host = host.toLowerCase().replace(/\.$/, '');
+        let isWildcard = false;
+        if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase()) && host !== 'www.' + baseDomain.toLowerCase()) {
+            isWildcard = true;
+        } else if (process.env.NODE_ENV !== 'production' && host.endsWith('.localhost') && host !== 'www.localhost') {
+            isWildcard = true;
+        }
+
+        if (isWildcard) {
+            // Completely bypass Helmet for wildcard proxies.
+            // This prevents strict CSP & MIME checks from blocking the destination's assets.
+            return next();
+        }
+    }
+    
+    helmetMiddleware(req, res, next);
+});
 
 // Rate limiting
 const apiLimiter = rateLimit({

@@ -160,8 +160,9 @@ function escapeAttr(str) {
  */
 function injectBaseTag(htmlBuffer, destinationUrl) {
     let baseOrigin;
+    let parsed;
     try {
-        const parsed = new URL(destinationUrl);
+        parsed = new URL(destinationUrl);
         // Use protocol + host (includes port if non-standard) + trailing slash
         baseOrigin = `${parsed.protocol}//${parsed.host}/`;
     } catch {
@@ -169,7 +170,21 @@ function injectBaseTag(htmlBuffer, destinationUrl) {
         return htmlBuffer;
     }
 
-    const baseTag = `<base href="${escapeAttr(baseOrigin)}">`;
+    // Single Page Applications (React, Vue) read window.location to determine state.
+    // If the destination requires query parameters (?token=...) or specific paths (/receiver.html),
+    // we must silently sync the browser's address bar to match those expectations
+    // while keeping the wildcard domain perfectly masked.
+    let stateScript = '';
+    const injectedPath = parsed.pathname + parsed.search;
+    if (injectedPath !== '/') {
+        stateScript = `<script>
+            if (window.location.pathname + window.location.search !== ${JSON.stringify(injectedPath)}) {
+                window.history.replaceState(null, '', ${JSON.stringify(injectedPath)});
+            }
+        </script>`;
+    }
+
+    const baseTag = `<base href="${escapeAttr(baseOrigin)}">${stateScript}`;
 
     let html = htmlBuffer.toString('utf8');
 

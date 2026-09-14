@@ -139,14 +139,25 @@ router.delete('/redirects/:id', (req, res) => {
     const idError = validateId(id);
     if (idError) return res.status(400).json({ error: idError });
 
-    db.run(`DELETE FROM redirects WHERE id = ?`, [id], function(err) {
-        if (err) {
-            return res.status(500).json({ error: 'Database error' });
-        }
-        if (this.changes === 0) {
-            return res.status(404).json({ error: 'Redirect not found' });
-        }
-        res.status(200).json({ success: true, message: 'Redirect deleted' });
+    // 1. Fetch the alias so we can clean up any session locks
+    db.get(`SELECT alias FROM redirects WHERE id = ?`, [id], (err, row) => {
+        if (err) return res.status(500).json({ error: 'Database error' });
+        if (!row) return res.status(404).json({ error: 'Redirect not found' });
+
+        const alias = row.alias.toLowerCase();
+
+        // 2. Delete the associated session lock from alias_sessions
+        db.run(`DELETE FROM alias_sessions WHERE alias = ?`, [alias], (sessionErr) => {
+            if (sessionErr) console.error('[API] Failed to delete alias_sessions:', sessionErr.message);
+
+            // 3. Delete the alias itself
+            db.run(`DELETE FROM redirects WHERE id = ?`, [id], function(deleteErr) {
+                if (deleteErr) {
+                    return res.status(500).json({ error: 'Database error' });
+                }
+                res.status(200).json({ success: true, message: 'Redirect and associated session locks deleted' });
+            });
+        });
     });
 });
 

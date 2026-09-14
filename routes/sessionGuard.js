@@ -141,19 +141,19 @@ function extractToken(req) {
  * buildClientSig — derive a deterministic fingerprint from the request.
  *
  * Components:
- *   • Client IP  (req.ip honours Express trust-proxy setting)
  *   • User-Agent (exact string)
- *   • Accept-Language (normalised to lower-case for minor variation tolerance)
+ *
+ * Note: We intentionally exclude IP address because mobile carrier networks
+ * (4G/5G) frequently rotate IPs between requests, which would cause false-positive
+ * 404 lockouts on a simple page refresh. The HTTP-Only HMAC cookie is already
+ * unforgeable and provides a rock-solid 1-device lock.
  *
  * @param {import('express').Request} req
- * @returns {string}  hex SHA-256 digest
+ * @returns {string} hex hash
  */
 function buildClientSig(req) {
-    const ip   = (req.ip || req.connection?.remoteAddress || '').trim();
-    const ua   = (req.get('user-agent')   || '').trim();
-    const lang = (req.get('accept-language') || '').toLowerCase().trim();
-
-    const raw = `${ip}|${ua}|${lang}`;
+    const ua = (req.get('user-agent') || '').trim();
+    const raw = `${ua}`;
     return crypto.createHash('sha256').update(raw).digest('hex');
 }
 

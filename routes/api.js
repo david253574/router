@@ -50,7 +50,7 @@ router.get('/config', (req, res) => {
 // Create a new redirect
 router.post('/redirects', (req, res) => {
     // Only extract expected fields
-    const alias = req.body.alias;
+    let alias = req.body.alias;
     const destination_url = req.body.destination_url;
     const expires_at = req.body.expires_at;
 
@@ -60,6 +60,9 @@ router.post('/redirects', (req, res) => {
     
     const aliasError = validateAlias(alias);
     if (aliasError) return res.status(400).json({ error: aliasError });
+    
+    // Normalize alias to lowercase to prevent subdomain case conflicts
+    alias = alias.toLowerCase();
     
     const urlError = validateUrl(destination_url);
     if (urlError) return res.status(400).json({ error: urlError });

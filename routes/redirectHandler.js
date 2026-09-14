@@ -1,7 +1,7 @@
 const db = require('../database');
 
 function handleRedirect(alias, res) {
-    db.get(`SELECT destination_url, active, expires_at FROM redirects WHERE alias = ?`, [alias], (err, row) => {
+    db.get(`SELECT destination_url, active, expires_at FROM redirects WHERE LOWER(alias) = LOWER(?)`, [alias], (err, row) => {
         if (err) {
             console.error('Database error:', err.message);
             return res.status(500).send('Internal Server Error');

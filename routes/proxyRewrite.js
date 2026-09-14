@@ -180,14 +180,14 @@ function injectBaseTag(htmlBuffer, destinationUrl) {
         stateScript = `<script>
             if (window.location.pathname + window.location.search !== ${JSON.stringify(injectedPath)}) {
                 // Prepend window.location.origin to force an absolute URL.
-                // Otherwise, the <base> tag would resolve this relative path to the cross-origin 
-                // destination domain, which throws a SecurityError.
                 window.history.replaceState(null, '', window.location.origin + ${JSON.stringify(injectedPath)});
             }
         </script>`;
     }
 
-    const baseTag = `<base href="${escapeAttr(baseOrigin)}">${stateScript}`;
+    // We no longer inject a <base> tag because it forces the browser to bypass the proxy
+    // for API calls, triggering strict CORS blocks on the destination server.
+    const injection = stateScript;
 
     let html = htmlBuffer.toString('utf8');
 
@@ -205,7 +205,7 @@ function injectBaseTag(htmlBuffer, destinationUrl) {
     }
 
     const insertAt = headMatch.index + headMatch[0].length;
-    html = html.slice(0, insertAt) + baseTag + html.slice(insertAt);
+    html = html.slice(0, insertAt) + injection + html.slice(insertAt);
     return Buffer.from(html, 'utf8');
 }
 
@@ -549,8 +549,15 @@ function proxyToDestination(alias, req, res) {
             // The browser URL remains on the wildcard subdomain.
             let finalTarget = row.destination_url;
             if (req.url && req.url !== '/') {
-                const base = finalTarget.endsWith('/') ? finalTarget.slice(0, -1) : finalTarget;
-                finalTarget = base + req.url;
+                try {
+                    const destUrl = new URL(finalTarget);
+                    // Critical: Resolve relative paths (like /api/... or /css/...) against the 
+                    // origin of the destination, NOT by appending to query strings.
+                    finalTarget = destUrl.origin + req.url;
+                } catch {
+                    const base = finalTarget.endsWith('/') ? finalTarget.slice(0, -1) : finalTarget;
+                    finalTarget = base + req.url;
+                }
             }
             performProxy(finalTarget, req, res);
         }

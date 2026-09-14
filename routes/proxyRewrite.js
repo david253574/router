@@ -14,11 +14,14 @@
  * Flow called from server.js (wildcard middleware):
  *   guardSession.onAllow → proxyToDestination(alias, req, res)
  *       ↓
- *   DB lookup  (same SELECT as handleRedirect — active + expiration checks)
- *       ↓ (circuit-break on any failure — 404, no destination exposed)
+ *   DB lookup  (active + expiration checks — circuit-break on any failure → 404)
+ *       ↓
  *   performProxy(destinationUrl, req, res)
  *       ↓
- *   Follow server-side redirects (max 5) → stream body to client
+ *   Follow server-side redirects (max 5)
+ *       ↓
+ *   text/html  → buffer → inject <base> tag → send
+ *   everything → pipe directly (no buffering)
  *
  * The existing /r/:alias route continues to use handleRedirect() (HTTP 302).
  * This module is only called from the wildcard middleware path.
@@ -37,12 +40,17 @@ const db    = require('../database');
 const MAX_REDIRECTS = 5;
 
 /**
- * Hop-by-hop headers must never be forwarded to the upstream destination.
- * RFC 7230 §6.1 defines the standard set; we also add internal/session headers
- * that belong only to our own infrastructure.
+ * Request headers that must never be forwarded to the upstream destination.
+ *
+ * accept-encoding is explicitly blocked so the upstream always returns
+ * identity (uncompressed) content.  This is required for correct HTML
+ * buffering and <base> tag injection — injecting into a gzip stream would
+ * produce a corrupt document.  Non-HTML assets (images, fonts, binary files)
+ * are never compressed by content-negotiation anyway, so the bandwidth impact
+ * is negligible.
  */
 const BLOCKED_REQUEST_HEADERS = new Set([
-    // Standard hop-by-hop (RFC 7230)
+    // Standard hop-by-hop (RFC 7230 §6.1)
     'connection',
     'keep-alive',
     'proxy-authenticate',
@@ -51,15 +59,17 @@ const BLOCKED_REQUEST_HEADERS = new Set([
     'trailer',
     'transfer-encoding',
     'upgrade',
-    // Routing — set to the destination host inside performProxy
+    // Overridden to the destination hostname inside performProxy
     'host',
-    // Do not leak our session cookies to the destination server
+    // Never leak our _rsid session cookie or admin session to the destination
     'cookie',
-    // Internal rate-limit telemetry
+    // Force identity encoding so we can safely buffer and modify HTML
+    'accept-encoding',
+    // Internal rate-limit counters — irrelevant to the destination
     'x-ratelimit-limit',
     'x-ratelimit-remaining',
     'x-ratelimit-reset',
-    // Vercel platform headers (internal infrastructure)
+    // Vercel internal platform headers
     'x-vercel-id',
     'x-vercel-deployment-url',
     'x-vercel-forwarded-for',
@@ -69,25 +79,151 @@ const BLOCKED_REQUEST_HEADERS = new Set([
 /**
  * Response headers from the upstream that must not reach the browser.
  *
- * Reason for each:
- *   set-cookie        — destination cookies would be scoped to our domain
- *   location          — we follow redirects server-side; browser must not see them
- *   transfer-encoding — we stream directly; Express manages its own framing
- *   connection        — hop-by-hop
- *   strict-transport-security — our domain's HSTS is managed by Helmet
- *   alt-svc           — destination's HTTP/3 hints are irrelevant to our domain
+ * set-cookie  — handled separately via rewriteSetCookieHeaders(); NOT here.
+ * location    — consumed server-side when following redirects; never exposed.
+ * content-length — managed explicitly after HTML injection changes body size.
+ *
+ * content-security-policy / content-security-policy-report-only:
+ *   Upstream CSP rules reference the destination origin (e.g. example.com).
+ *   They would block scripts and styles from loading inside our wildcard
+ *   window environment, breaking page functionality.  Stripped entirely.
+ *
+ * x-frame-options:
+ *   SAMEORIGIN / DENY from the upstream would prevent the document from
+ *   rendering inside any framed context on our domain.  Stripped.
+ *
+ * strict-transport-security / alt-svc:
+ *   Our domain's HSTS and protocol-upgrade hints are managed by Helmet.
  */
 const BLOCKED_RESPONSE_HEADERS = new Set([
-    'set-cookie',
-    'location',
-    'transfer-encoding',
+    // Hop-by-hop
     'connection',
     'keep-alive',
     'trailer',
     'upgrade',
+    'transfer-encoding',
+    // Redirects are followed server-side; browser must never see Location
+    'location',
+    // Managed explicitly per response type (HTML vs binary)
+    'content-length',
+    // CSP: destination-domain rules break execution in our wildcard context
+    'content-security-policy',
+    'content-security-policy-report-only',
+    // Framing restriction from the upstream does not apply to our domain
+    'x-frame-options',
+    // Infrastructure headers managed by Helmet
     'strict-transport-security',
     'alt-svc',
+    // set-cookie is NOT in this set — it is processed by rewriteSetCookieHeaders()
 ]);
+
+// ---------------------------------------------------------------------------
+// Helper: <base> tag injection
+// ---------------------------------------------------------------------------
+
+/**
+ * escapeAttr
+ *
+ * Minimal attribute-value escaping for the href in the injected <base> tag.
+ * Prevents a maliciously crafted destination URL from breaking the tag.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeAttr(str) {
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
+}
+
+/**
+ * injectBaseTag
+ *
+ * Inserts `<base href="https://destination.com/">` immediately after the
+ * opening <head> tag in an HTML document buffer.
+ *
+ * Effect on the browser:
+ *   Every relative asset path in the document — /css/app.css, /js/main.js,
+ *   ../images/logo.png — is resolved against the destination origin rather
+ *   than our wildcard root.  This repairs broken layouts, styles, and scripts
+ *   without rewriting individual href/src attributes throughout the HTML.
+ *
+ * Edge cases handled:
+ *   • <head> with attributes:  <head lang="en" data-theme="dark">
+ *   • No <head> tag present (document fragment) → returns buffer unchanged
+ *
+ * @param {Buffer} htmlBuffer     — raw (uncompressed) HTML body
+ * @param {string} destinationUrl — fully-qualified destination URL
+ * @returns {Buffer}              — modified HTML body
+ */
+function injectBaseTag(htmlBuffer, destinationUrl) {
+    let baseOrigin;
+    try {
+        const parsed = new URL(destinationUrl);
+        // Use protocol + host (includes port if non-standard) + trailing slash
+        baseOrigin = `${parsed.protocol}//${parsed.host}/`;
+    } catch {
+        // Unparseable destination URL — return the buffer unmodified
+        return htmlBuffer;
+    }
+
+    const baseTag = `<base href="${escapeAttr(baseOrigin)}">`;
+
+    let html = htmlBuffer.toString('utf8');
+
+    // Match the first <head> tag, allowing for any attributes
+    const headMatch = html.match(/<head(?:\s[^>]*)?>/ );
+    if (!headMatch) {
+        // No <head> tag — document fragment or unusual structure; skip injection
+        return htmlBuffer;
+    }
+
+    const insertAt = headMatch.index + headMatch[0].length;
+    html = html.slice(0, insertAt) + baseTag + html.slice(insertAt);
+    return Buffer.from(html, 'utf8');
+}
+
+// ---------------------------------------------------------------------------
+// Helper: Set-Cookie domain rewriting
+// ---------------------------------------------------------------------------
+
+/**
+ * rewriteSetCookieHeaders
+ *
+ * Rewrites the Domain attribute of upstream Set-Cookie headers so that
+ * cookies are scoped to the wildcard domain rather than the destination domain.
+ *
+ * Without rewriting, the browser would reject these cookies because the
+ * Set-Cookie Domain does not match the address-bar domain (alias.yourdomain.com).
+ *
+ * Behaviour:
+ *   • If Domain=<anything> is present  → replaced with Domain=.<wildcardDomain>
+ *   • If no Domain attribute is present → Domain=.<wildcardDomain> is appended
+ *
+ * Leading dot on the domain (`.yourdomain.com`) follows RFC 6265 §4.1.2.3
+ * and allows the cookie to be sent to all subdomains of wildcardDomain.
+ *
+ * @param {string|string[]|undefined} raw           — upstream Set-Cookie value(s)
+ * @param {string}                    wildcardDomain — e.g. "yourdomain.com"
+ * @returns {string[]}                              — rewritten Set-Cookie strings
+ */
+function rewriteSetCookieHeaders(raw, wildcardDomain) {
+    if (!raw) return [];
+
+    const headers = Array.isArray(raw) ? raw : [raw];
+
+    return headers.map((header) => {
+        // Replace an existing Domain= directive (case-insensitive, any value)
+        if (/;\s*Domain=/i.test(header)) {
+            return header.replace(
+                /;\s*Domain=[^;]*/gi,
+                `; Domain=.${wildcardDomain}`
+            );
+        }
+        // No Domain directive present — append one
+        return `${header}; Domain=.${wildcardDomain}`;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Core proxy engine
@@ -96,18 +232,30 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
 /**
  * performProxy
  *
- * Fetches `targetUrl` using Node's built-in http/https module and pipes
- * the response body directly to `res` (the Express response object).
- * Server-side redirects from the destination are followed transparently,
- * up to MAX_REDIRECTS, so the browser never sees a Location header.
+ * Fetches targetUrl and delivers the response to the browser with:
  *
- * @param {string}                     targetUrl      — fully-qualified destination URL
- * @param {import('express').Request}  req            — original inbound Express request
- * @param {import('express').Response} res            — Express response to write into
- * @param {number}                     [redirectCount=0] — internal recursion counter
+ *   text/html responses
+ *     • Fully buffered (required for <base> injection)
+ *     • <base href="..."> injected immediately after the opening <head> tag
+ *     • Correct content-length set after injection
+ *
+ *   All other content types (JS, CSS, images, JSON, fonts, …)
+ *     • Piped directly to the browser with zero buffering
+ *     • content-length forwarded from the upstream unchanged
+ *
+ *   All responses
+ *     • Server-side redirect following (301/302/303/307/308, max 5 hops)
+ *     • Set-Cookie domain rewritten to wildcardDomain
+ *     • CSP, X-Frame-Options, HSTS stripped
+ *     • Upstream session cookies never sent to destination
+ *
+ * @param {string}                     targetUrl
+ * @param {import('express').Request}  req
+ * @param {import('express').Response} res
+ * @param {number}                     [redirectCount=0]
  */
 function performProxy(targetUrl, req, res, redirectCount = 0) {
-    // Guard: too many destination-side redirects
+    // Guard: abort if the destination keeps redirecting indefinitely
     if (redirectCount > MAX_REDIRECTS) {
         if (!res.headersSent) res.status(502).end();
         return;
@@ -122,7 +270,6 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
         return;
     }
 
-    // Only http: and https: are permitted as proxy destinations
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
         if (!res.headersSent) res.status(502).end();
         return;
@@ -130,36 +277,42 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
 
     const lib = parsed.protocol === 'https:' ? https : http;
 
-    // Build the forwarded header set: safe subset of the original request headers
+    // Build the outbound header set: forward a safe subset of the client's headers.
+    // accept-encoding is stripped (see BLOCKED_REQUEST_HEADERS comment above).
     const forwardHeaders = {};
     for (const [key, value] of Object.entries(req.headers)) {
         if (!BLOCKED_REQUEST_HEADERS.has(key.toLowerCase())) {
             forwardHeaders[key] = value;
         }
     }
-    // Override Host to match the destination — this is essential for
-    // virtual-host routing on the destination server
+    // The destination must receive its own hostname — required for virtual-host
+    // routing (SNI, HTTP/1.1 Host header).
     forwardHeaders['host'] = parsed.hostname;
 
     const options = {
         hostname: parsed.hostname,
         port:     parsed.port
-                    ? Number(parsed.port)
-                    : parsed.protocol === 'https:' ? 443 : 80,
+                      ? Number(parsed.port)
+                      : parsed.protocol === 'https:' ? 443 : 80,
         path:     parsed.pathname + parsed.search,
         method:   'GET',
         headers:  forwardHeaders,
-        // 10-second wall-clock timeout; Vercel Pro allows up to 60s
+        // 10-second wall-clock timeout (Vercel Pro limit is 60 s)
         timeout:  10000,
     };
+
+    // Resolve the wildcard domain for Set-Cookie rewriting.
+    // In production this is REDIRECT_BASE_DOMAIN; in dev it falls back to localhost.
+    const wildcardDomain =
+        process.env.REDIRECT_BASE_DOMAIN ||
+        (process.env.NODE_ENV !== 'production' ? 'localhost' : null);
 
     const proxyReq = lib.request(options, (proxyRes) => {
         const status = proxyRes.statusCode || 502;
 
-        // Follow destination-side redirects server-side so the browser
-        // address bar never changes
+        // ── Server-side redirect following ────────────────────────────────────
         if ([301, 302, 303, 307, 308].includes(status)) {
-            // Drain and discard the redirect body
+            // Drain and discard the redirect body to free the socket
             proxyRes.resume();
 
             const rawLocation = proxyRes.headers['location'];
@@ -168,7 +321,7 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
                 return;
             }
 
-            // Resolve relative Location headers against the current URL
+            // Resolve relative Location values against the current URL
             let nextUrl;
             try {
                 nextUrl = new URL(rawLocation, targetUrl).toString();
@@ -181,41 +334,90 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
             return;
         }
 
-        // ── Stream response to the browser ───────────────────────────────────
+        // ── Deliver response to browser ───────────────────────────────────────
         if (res.headersSent) return;
 
-        // Set status code
         res.status(status);
 
         // Forward filtered upstream headers
         for (const [key, value] of Object.entries(proxyRes.headers)) {
-            if (!BLOCKED_RESPONSE_HEADERS.has(key.toLowerCase())) {
-                try {
-                    res.set(key, value);
-                } catch {
-                    // Ignore any headers Express refuses (e.g. duplicate content-type)
+            const lkey = key.toLowerCase();
+
+            // Skip headers that are fully blocked
+            if (BLOCKED_RESPONSE_HEADERS.has(lkey)) continue;
+
+            // Set-Cookie: rewrite Domain attribute before forwarding
+            if (lkey === 'set-cookie') {
+                if (wildcardDomain) {
+                    for (const cookie of rewriteSetCookieHeaders(value, wildcardDomain)) {
+                        res.append('Set-Cookie', cookie);
+                    }
                 }
+                // If no wildcard domain is resolvable, drop the Set-Cookie header
+                // rather than forward a cookie the browser would reject
+                continue;
+            }
+
+            try {
+                res.set(key, value);
+            } catch {
+                // Ignore headers Express refuses (e.g. already-set Content-Type)
             }
         }
 
-        // Pipe the upstream response body directly to the client.
-        // No buffering — keeps memory usage flat for large responses.
-        proxyRes.pipe(res);
+        // ── Branch on content type ────────────────────────────────────────────
+        const contentType = (proxyRes.headers['content-type'] || '').toLowerCase();
+        const isHtml = contentType.includes('text/html');
 
-        proxyRes.on('error', (err) => {
-            console.error('[proxyRewrite] upstream response stream error:', err.message);
-            if (!res.headersSent) res.status(502).end();
-            else res.end();
-        });
+        if (isHtml) {
+            // Buffer the full HTML body so we can inject the <base> tag.
+            // Memory usage is bounded by the size of the HTML document itself;
+            // binary assets (images, video) are never buffered (see else-branch).
+            const chunks = [];
+
+            proxyRes.on('data', (chunk) => {
+                chunks.push(chunk);
+            });
+
+            proxyRes.on('end', () => {
+                if (res.headersSent) return;
+
+                const raw      = Buffer.concat(chunks);
+                const modified = injectBaseTag(raw, targetUrl);
+
+                // Set the correct content-length after injection expands the body
+                res.set('content-length', String(modified.length));
+                res.end(modified);
+            });
+
+            proxyRes.on('error', (err) => {
+                console.error('[proxyRewrite] HTML buffer error:', err.message);
+                if (!res.headersSent) res.status(502).end();
+            });
+
+        } else {
+            // Non-HTML: stream bytes directly to the client with zero buffering.
+            // Forward the upstream content-length so the browser can show progress.
+            const upstreamLength = proxyRes.headers['content-length'];
+            if (upstreamLength) res.set('content-length', upstreamLength);
+
+            proxyRes.pipe(res);
+
+            proxyRes.on('error', (err) => {
+                console.error('[proxyRewrite] upstream response stream error:', err.message);
+                if (!res.headersSent) res.status(502).end();
+                else res.end();
+            });
+        }
     });
 
-    // Network-level timeout: destroy the socket and return 504
+    // Network-level timeout: destroy the socket cleanly and return 504
     proxyReq.on('timeout', () => {
         proxyReq.destroy();
         if (!res.headersSent) res.status(504).end();
     });
 
-    // Network-level connection error (DNS failure, refused, TLS error, etc.)
+    // Network-level error: DNS failure, connection refused, TLS error, etc.
     proxyReq.on('error', (err) => {
         console.error('[proxyRewrite] upstream request error:', err.message);
         if (!res.headersSent) res.status(502).end();
@@ -235,14 +437,15 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
  * guardSession onAllow callback).
  *
  * Responsibilities:
- *   1. Query the redirects table for the alias (same query as handleRedirect)
- *   2. Enforce active + expiration checks (circuit-break → 404 on any failure)
- *   3. Delegate to performProxy — no HTTP redirect is issued
+ *   1. Query the redirects table for the alias
+ *   2. Enforce active + expiration checks
+ *   3. Circuit-break with 404 on any validation failure
+ *   4. Delegate to performProxy — no HTTP redirect is ever issued
  *
- * The destination URL is never exposed to the browser.
+ * The destination URL is never sent to the browser.
  * The /r/:alias route is entirely unaffected (still uses handleRedirect → 302).
  *
- * @param {string}                     alias  — extracted alias string
+ * @param {string}                     alias
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
  */
@@ -253,27 +456,20 @@ function proxyToDestination(alias, req, res) {
           WHERE LOWER(alias) = LOWER(?)`,
         [alias],
         (err, row) => {
-            // Circuit-break: database error
             if (err) {
                 console.error('[proxyRewrite] DB error:', err.message);
                 return res.status(500).end();
             }
 
             // Circuit-break: alias not found
-            if (!row) {
-                return res.status(404).end();
-            }
+            if (!row) return res.status(404).end();
 
             // Circuit-break: alias administratively disabled
-            if (!row.active) {
-                return res.status(404).end();
-            }
+            if (!row.active) return res.status(404).end();
 
             // Circuit-break: alias past its expiration date
-            if (row.expires_at) {
-                if (new Date() > new Date(row.expires_at)) {
-                    return res.status(404).end();
-                }
+            if (row.expires_at && new Date() > new Date(row.expires_at)) {
+                return res.status(404).end();
             }
 
             // All checks passed — perform internal rewrite.

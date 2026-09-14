@@ -119,11 +119,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${expText}</td>
                         <td>${createdText}</td>
                         <td class="actions-cell">
-                            <button onclick="copyToClipboard('${redirect.redirect_url}')">Copy Link</button>
-                            <button class="${redirect.active ? 'danger' : 'success-btn'}" onclick="toggleStatus(${redirect.id}, ${redirect.active})">
+                            <button data-action="copy" data-url="${redirect.redirect_url}">Copy Link</button>
+                            <button class="${redirect.active ? 'danger' : 'success-btn'}" data-action="toggle" data-id="${redirect.id}" data-status="${redirect.active}">
                                 ${redirect.active ? 'Disable' : 'Enable'}
                             </button>
-                            <button class="danger" onclick="deleteRedirect(${redirect.id})">Delete</button>
+                            <button class="danger" data-action="delete" data-id="${redirect.id}">Delete</button>
                         </td>
                     `;
                     tableBody.appendChild(tr);
@@ -131,6 +131,24 @@ document.addEventListener('DOMContentLoaded', () => {
             })
             .catch(err => console.error(err));
     }
+
+    // Use event delegation for dynamically created buttons to comply with CSP (blocks inline onclick)
+    tableBody.addEventListener('click', (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+
+        const action = btn.getAttribute('data-action');
+        if (action === 'copy') {
+            copyToClipboard(btn.getAttribute('data-url'));
+        } else if (action === 'toggle') {
+            const id = btn.getAttribute('data-id');
+            const status = btn.getAttribute('data-status') === 'true';
+            toggleStatus(id, status);
+        } else if (action === 'delete') {
+            const id = btn.getAttribute('data-id');
+            deleteRedirect(id);
+        }
+    });
 
     form.addEventListener('submit', (e) => {
         e.preventDefault();

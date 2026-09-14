@@ -8,6 +8,7 @@ const apiRoutes = require('./routes/api');
 const redirectRoutes = require('./routes/redirects');
 const authRoutes = require('./routes/auth');
 const db = require('./database');
+const { checkTraffic } = require('./routes/trafficFilter');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -76,19 +77,40 @@ app.use((req, res, next) => {
 
     host = host.toLowerCase().replace(/\.$/, '');
     
-    let alias = null;
-    if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase())) {
-        alias = host.slice(0, -('.' + baseDomain).length);
-    } else if (process.env.NODE_ENV !== 'production' && host.endsWith('.localhost')) {
-        alias = host.slice(0, -('.localhost').length);
+    let isWildcard = false;
+    if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase()) && host !== 'www.' + baseDomain.toLowerCase()) {
+        isWildcard = true;
+    } else if (process.env.NODE_ENV !== 'production' && host.endsWith('.localhost') && host !== 'www.localhost') {
+        isWildcard = true;
     }
-    
-    if (alias && alias !== 'www') {
-        if (req.path === '/') {
-            const { handleRedirect } = require('./routes/redirectHandler');
-            return handleRedirect(alias, res);
-        }
+
+    if (isWildcard && req.path === '/') {
+        // 1. Validate request (use existing redirectLimiter)
+        return redirectLimiter(req, res, () => {
+            // 2. Run traffic checks — circuit-break before any DB call
+            const trafficResult = checkTraffic(req);
+            if (trafficResult.blocked) {
+                return res.status(403).end();
+            }
+
+            // 3. Extract alias from hostname
+            let alias = null;
+            if (baseDomain && host.endsWith('.' + baseDomain.toLowerCase())) {
+                alias = host.slice(0, -('.' + baseDomain).length);
+            } else if (process.env.NODE_ENV !== 'production' && host.endsWith('.localhost')) {
+                alias = host.slice(0, -('.localhost').length);
+            }
+
+            // 4 & 5 & 6 & 7 & 8. Find alias, check active, check expiration, 302 redirect
+            if (alias) {
+                const { handleRedirect } = require('./routes/redirectHandler');
+                return handleRedirect(alias, res);
+            } else {
+                return next();
+            }
+        });
     }
+
     next();
 });
 

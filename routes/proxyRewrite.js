@@ -109,6 +109,8 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
     // CSP: destination-domain rules break execution in our wildcard context
     'content-security-policy',
     'content-security-policy-report-only',
+    // Upstream CORS directives must be overridden with permissive ones
+    'access-control-allow-origin',
     // Framing restriction from the upstream does not apply to our domain
     'x-frame-options',
     // Infrastructure headers managed by Helmet
@@ -171,11 +173,17 @@ function injectBaseTag(htmlBuffer, destinationUrl) {
 
     let html = htmlBuffer.toString('utf8');
 
+    // 1. Strip internal Meta CSP tags that block asset fetching and inline execution
+    html = html.replace(/<meta[^>]+http-equiv=['"]?Content-Security-Policy['"]?[^>]*>/gi, '');
+
+    // 2. Remove Subresource Integrity (SRI) attributes to prevent asset rejection
+    html = html.replace(/\s+integrity=['"][^'"]+['"]/gi, '');
+
     // Match the first <head> tag, allowing for any attributes
     const headMatch = html.match(/<head(?:\s[^>]*)?>/ );
     if (!headMatch) {
-        // No <head> tag — document fragment or unusual structure; skip injection
-        return htmlBuffer;
+        // No <head> tag — document fragment or unusual structure; return sanitized html
+        return Buffer.from(html, 'utf8');
     }
 
     const insertAt = headMatch.index + headMatch[0].length;
@@ -363,6 +371,9 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
 
         res.status(status);
 
+        // Unconditionally force permissive CORS for all assets (fonts, scripts, css)
+        res.set('access-control-allow-origin', '*');
+
         // Forward filtered upstream headers
         for (const [key, value] of Object.entries(proxyRes.headers)) {
             const lkey = key.toLowerCase();
@@ -379,13 +390,6 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
                 }
                 // If no wildcard domain is resolvable, drop the Set-Cookie header
                 // rather than forward a cookie the browser would reject
-                continue;
-            }
-
-            // CORS Override: rewrite upstream ACA-Origin to match the client's origin
-            if (lkey === 'access-control-allow-origin') {
-                const clientOrigin = req.get('origin') || '*';
-                try { res.set('access-control-allow-origin', clientOrigin); } catch {}
                 continue;
             }
 

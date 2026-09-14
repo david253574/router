@@ -369,6 +369,12 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
         // ── Deliver response to browser ───────────────────────────────────────
         if (res.headersSent) return;
 
+        // Strip global Helmet security headers that conflict with the proxied site
+        res.removeHeader('content-security-policy');
+        res.removeHeader('x-frame-options');
+        res.removeHeader('x-content-type-options');
+        res.removeHeader('strict-transport-security');
+
         res.status(status);
 
         // Unconditionally force permissive CORS for all assets (fonts, scripts, css)

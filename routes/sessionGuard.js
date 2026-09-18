@@ -212,6 +212,71 @@ function dbCreateSession(alias, token, clientSig, cb) {
     );
 }
 
+/**
+ * buildLoadingPage
+ *
+ * Returns a minimal HTML loading page that:
+ *   1. Shows a spinner to the user while the JS challenge runs.
+ *   2. POSTs to /_challenge with the alias — proving the visitor is a
+ *      real JavaScript-capable browser (network-provider scanners are not).
+ *   3. On a 200 OK from /_challenge, reloads the page so guardSession
+ *      now finds an existing session with a valid cookie and grants access.
+ *   4. On any failure, reloads anyway so the user gets a clean retry.
+ *
+ * The /_challenge endpoint (added in server.js) calls guardSession internally
+ * to create the DB session row and set the _rsid cookie.
+ *
+ * @param {string} alias
+ * @param {boolean} isProduction
+ * @returns {string} HTML string
+ */
+function buildLoadingPage(alias, isProduction) {
+    // Escape the alias for safe inline JS embedding
+    const safeAlias = JSON.stringify(alias);
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading...</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+         background:#0f0f0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    .wrap{text-align:center;color:#fff}
+    .spinner{width:48px;height:48px;border:4px solid rgba(255,255,255,.15);
+             border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 20px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    p{font-size:15px;color:rgba(255,255,255,.55);letter-spacing:.3px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="spinner"></div>
+    <p>Loading, please wait&hellip;</p>
+  </div>
+  <script>
+    (function () {
+      var alias = ${safeAlias};
+      fetch('/_challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias: alias }),
+        credentials: 'include'
+      })
+      .then(function (r) {
+        // Whether success or already-claimed, reload to let guardSession decide
+        window.location.reload();
+      })
+      .catch(function () {
+        window.location.reload();
+      });
+    })();
+  </script>
+</body>
+</html>`;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -221,12 +286,14 @@ function dbCreateSession(alias, token, clientSig, cb) {
  *
  * Enforces the one-user-per-link session policy for a wildcard alias.
  *
- * Call this AFTER traffic checks pass and BEFORE handleRedirect().
+ * Call this AFTER traffic checks pass and BEFORE proxyToDestination().
  *
  * Decision tree:
- *   No existing session for alias  → register, allow
- *   Existing session, token match + sig match → allow
- *   Existing session, any mismatch → block (return 404)
+ *   No existing session for alias
+ *     → Called from wildcard GET  → serve loading page (JS challenge)
+ *     → Called from /_challenge POST → register, set cookie, respond { ok: true }
+ *   Existing session, token match + sig match → allow (call onAllow)
+ *   Existing session, any mismatch            → block (return 404)
  *
  * "Allow" means the provided `onAllow` callback is invoked so the caller
  * can continue the redirect flow.  "Block" terminates the response here.
@@ -249,29 +316,52 @@ function guardSession(req, res, alias, onAllow) {
         }
 
         if (!existingSession) {
-            // ── First access: register this client as the session owner ──────
-            const newToken = generateToken();
+            // ── No session exists yet ────────────────────────────────────────
+            //
+            // This branch is reached in two scenarios:
+            //
+            //   A. Wildcard GET (MTN bot or real user first visit)
+            //      → serve the JS-challenge loading page.
+            //      → MTN/Airtel bots cannot execute JavaScript, so they leave
+            //        without ever posting to /_challenge, link stays unburnt.
+            //
+            //   B. POST /_challenge from the loading page's JS fetch()
+            //      → The wildcard middleware short-circuits /_challenge POSTs,
+            //        so this branch here is reached via the dedicated route
+            //        handler in server.js, which calls onAllow() on success.
+            //      → Create session, set cookie, call onAllow().
+            //
+            // We distinguish the two by req.method: the dedicated /_challenge
+            // route only accepts POST; everything else (GET from wildcard
+            // middleware) gets the loading page.
+            if (req.method !== 'POST') {
+                // Scenario A — serve the loading page gate.
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-store');
+                return res.status(200).end(buildLoadingPage(alias, isProduction));
+            }
 
+            // Scenario B — real browser passed the JS challenge. Lock the session.
+            const newToken = generateToken();
             dbCreateSession(alias, newToken, incomingClientSig, (createErr) => {
                 if (createErr) {
-                    // Race condition: another request registered between our
-                    // SELECT and our INSERT.  Treat as a duplicate access attempt.
                     if (
                         createErr.message &&
                         createErr.message.includes('UNIQUE constraint failed')
                     ) {
-                        return res.status(404).end();
+                        // Race: another tab already claimed it between SELECT and INSERT.
+                        // Return 409 so the loading page JS reloads; guardSession will
+                        // then find the existing session and validate the cookie.
+                        return res.status(409).json({ error: 'already-claimed' });
                     }
                     console.error('[sessionGuard] DB insert error:', createErr.message);
                     return res.status(500).end();
                 }
-
-                // Issue cookie and allow the redirect to proceed
+                // Session locked. Cookie set. Caller sends { ok: true }.
                 setCookie(res, newToken, isProduction);
                 return onAllow();
             });
-
-            return; // wait for async callback
+            return;
         }
 
         // ── Subsequent access: validate token + client signature ─────────────

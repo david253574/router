@@ -110,12 +110,18 @@ app.use((req, res, next) => {
     }
 
     if (isWildcard) {
+        // Short-circuit: /_challenge POSTs must reach their dedicated route below,
+        // not be caught here and forwarded to proxyToDestination().
+        if (req.method === 'POST' && req.path === '/_challenge') {
+            return next();
+        }
+
         // 1. Validate request (use existing redirectLimiter)
         return redirectLimiter(req, res, () => {
             // 2. Run traffic checks — circuit-break before any DB call
             const trafficResult = checkTraffic(req);
             if (trafficResult.blocked) {
-                return res.status(403).end();
+                return res.status(404).end();
             }
 
             // 3. Extract alias from hostname
@@ -180,6 +186,21 @@ function requireAuth(req, res, next) {
 // Routes
 app.use('/api', apiLimiter, requireAuth, apiRoutes);
 app.use('/r', redirectLimiter, redirectRoutes);
+
+// ── Bot-proof JS challenge endpoint ─────────────────────────────────────────
+// Called by the loading page's hidden JavaScript (real browsers only).
+// Bots that can't execute JS will never reach this route, so they can't
+// burn a link by visiting the subdomain before the real user does.
+app.post('/_challenge', redirectLimiter, (req, res) => {
+    const alias = req.body && req.body.alias;
+    if (!alias || typeof alias !== 'string') {
+        return res.status(400).json({ error: 'Missing alias' });
+    }
+    const { guardSession } = require('./routes/sessionGuard');
+    guardSession(req, res, alias, () => {
+        res.json({ ok: true });
+    });
+});
 
 // Fallback Global Error Handler
 app.use((err, req, res, next) => {

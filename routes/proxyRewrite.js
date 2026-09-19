@@ -333,7 +333,7 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
     // Handle body for non-GET/HEAD/OPTIONS requests that were parsed by express.json
     let bodyStr = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
-        if (req._body && req.body && typeof req.body === 'object') {
+        if (req.body !== undefined && req.body !== null && typeof req.body === 'object') {
             bodyStr = JSON.stringify(req.body);
             forwardHeaders['content-length'] = String(Buffer.byteLength(bodyStr));
         }
@@ -487,7 +487,7 @@ function performProxy(targetUrl, req, res, redirectCount = 0) {
         if (bodyStr !== null) {
             proxyReq.write(bodyStr);
             proxyReq.end();
-        } else if (req._body) {
+        } else if (req.body !== undefined) {
             // Body was consumed by body-parser but wasn't a standard JSON object
             proxyReq.end();
         } else {
